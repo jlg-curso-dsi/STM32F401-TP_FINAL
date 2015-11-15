@@ -4,7 +4,7 @@
   * @author  Gustavo Muro
   * @version V0.0.1
   * @date    30/05/2015
-  * @brief   Archivo de aplicación.
+  * @brief   Archivo de aplicaciÃ³n.
   ******************************************************************************
   * @attention
   *
@@ -70,14 +70,27 @@ typedef enum
 
 #define SINE_GEN_500HZ_LENGTH         (SINE_GEN_AUDIO_SAMPLE_RATE/500)
 
+#define Y_UMBRAL                      1500  //Obtenido experimentalmente, solo para nuestro archivo
+
+#define TICK_60_SEG                   60000 //Valor de tickcount para intervalo de 60 segundos
+
+#define TICK_1_SEG                    1000  //Valor de tickcount para intervalo de 1 segundo
+
+#define SHORT_TONE_DURATION           128   //Duracion de tono corto en milisegundos
+
+#define LONG_TONE_DURATION            512   //Duracion de tono largo en milisegundos
+
 /* Private variables ---------------------------------------------------------*/
 static FATFS USBDISKFatFs;           /* File system object for USB disk logical drive */
 static char USBDISKPath[4];          /* USB Host logical drive path */
 static appState_enum appState = APPSTATE_IDLE;
 static audioFilter_filterSel_enum filterSel = AUDIO_FILTER_FILTER_SEL_BAND_PASS;
 static uint8_t usbConnected = 0;
-static uint32_t tickstart = 0; //Para temporizaciones junto con la variable tickcount
-static uint32_t nmax = 0;      //Cantidad de buffers que superaron el umbral
+static uint32_t tickstart = 0;   //Para temporizaciones junto con la variable tickcount
+static uint32_t nmax = 0;        //Cantidad de buffers que superaron el umbral
+static uint32_t ToneDuration;    //Duracion del tono en milisegundos
+static uint32_t SampleNbr;       //Cantidad de muestras por segundo (SampleRate * NbrChannels)
+static char bPulsador = 0;       //Estado del pulsador de usuario
 
 /* Variable used by FatFs*/
 static FIL FileRead;
@@ -85,15 +98,13 @@ static FIL FileWrite;
 
 static const int16_t sine_1khz_FS8khz[SINE_GEN_1KHZ_LENGTH] =
 {
-  0, 23169, 32767, 23169, 0, -23169, 32767, -23169
+  0, 23169, 32767, 23169, 0, -23169, -32767, -23169
 };
 
 static const int16_t sine_500hz_FS8khz[SINE_GEN_500HZ_LENGTH] =
 {
   0,12539,23169,30272,32767,30272,23169,12539,0,-12539,-23169,-30272,-32767,-30272,-23169,-12539
 };
-
-
 
 /* Private function prototypes -----------------------------------------------*/
 /* Private functions ---------------------------------------------------------*/
@@ -102,8 +113,8 @@ int32_t getDataCB(int16_t *pBuff, int32_t length)
   UINT bytesread = 0;
   uint32_t tickcount; //Para temporizaciones junto con la variable estatica tickstart
   uint32_t i;         //Indice para recorrer pBuff y buscar el maximo
-	int16_t ymax = 0;   //Valor maximo de las muestras del buffer
-	char bResetClk = 0; //Para sincronizar el temp de 1 minuto
+  int16_t ymax = 0;   //Valor maximo de las muestras del buffer
+  char bResetClk = 0; //Para sincronizar el temp de 1 minuto
 
 //  TickTock_Stop();
 //  TickTock_Start();
@@ -112,44 +123,59 @@ int32_t getDataCB(int16_t *pBuff, int32_t length)
 
   audioFilter_filter(pBuff, pBuff, length);
   
-	//Buscamos el maximo en pBuff
-	for (i = 0 ; i < length ; i++)
-	{
+  //Buscamos el maximo en pBuff
+  for (i = 0 ; i < (bytesread/2) ; i++)
+  {
     if (ymax < pBuff[i]) ymax = pBuff[i];
-	}
-  // printf("ymax: %u \n",ymax);  //Utilizado para ver ymax y elegir el umbral
+  }
+  // printf("ymax: %u \n",ymax);  //Utilizado para ver ymax y elegir el valor de Y_UMBRAL
 
-	//Comparo ymax con el umbral 1500, si es mayor esta presente un tono, incremento nmax
-	if (ymax > 1500)
-	{
+  //Comparo ymax con Y_UMBRAL, si es mayor esta presente un tono, incremento nmax
+  if (ymax > Y_UMBRAL)
+  {
     nmax++;
     BSP_LED_On(LED4);
-   //Si nmax es mayor a 4 estoy en el tono largo
-	  if (nmax > 4)
-		{
-			BSP_LED_On(LED3);
-			bResetClk = 1;    //Para sincronizar el temp de 1 minuto
-		}
-	}
-	else
-	{
-		nmax=0;
-    bResetClk = 0;
+    ToneDuration = nmax*((bytesread*500)/SampleNbr);
+    
+    //Si ToneDuration es mayor a SHORT_TONE_DURATION estoy en el tono largo
+    if (ToneDuration > SHORT_TONE_DURATION)
+    {
+      BSP_LED_On(LED3);
+
+      //Si ToneDuration es mayor a LONG_TONE_DURATION llego al final
+      //del tono largo y sincronizo el temp de 1 minuto
+      if (ToneDuration > LONG_TONE_DURATION) bResetClk = 1;
+    }
+  }
+  else
+  {
+    if (nmax != 0) printf("nmax: %u - ToneDuration: aprox. %u ms\n",nmax,ToneDuration);
+    nmax=0;
     BSP_LED_Off(LED3);
     BSP_LED_Off(LED4);
-	}
+  }
 
-	//Uso del teclado para sincronizar el temp de 1 minuto
-	if (HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_0) == GPIO_PIN_SET) bResetClk = 1;
-	
-	//Temporizador de 1 minuto
-	tickcount = HAL_GetTick();
-	if (((tickcount - tickstart) > 60000) | bResetClk)
-	{
-		tickstart = tickcount;
-	}
-	//Si estoy dentro del 1er segundo enciendo LED5
-	if ((tickcount - tickstart) < 1000) BSP_LED_On(LED5);
+  //Uso del teclado para sincronizar el temp de 1 minuto
+  if (HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_0) == GPIO_PIN_SET)
+  {
+    if (bPulsador == 0)
+    {
+      printf("pulsador activado\n");
+      bPulsador = 1;
+      bResetClk = 1;
+    }
+  }
+  else if (bPulsador == 1) bPulsador = 0;
+
+  //Temporizador de 1 minuto
+  tickcount = HAL_GetTick();
+  if (((tickcount - tickstart) > TICK_60_SEG) | bResetClk)
+  {
+    tickstart = tickcount;
+    bResetClk = 0;
+  }
+  //Si estoy dentro del 1er segundo enciendo LED5
+  if ((tickcount - tickstart) < TICK_1_SEG) BSP_LED_On(LED5);
   else BSP_LED_Off(LED5);
 
   return bytesread;
@@ -262,16 +288,20 @@ extern void application_task(void)
       }
       else
       {
-				//Seleciono filtro
+        //Seleciono filtro
         //filterSel = AUDIO_FILTER_FILTER_SEL_HIGH_PASS;
         //audioFilter_filterSel(filterSel);
 
         /* Read sizeof(WaveFormat) from the selected file */
         f_read (&FileRead, &waveformat, sizeof(waveformat), &bytesread);
+
+        //Cantidad de muestras por segundo (usado luego en getDataCB)
+        SampleNbr = waveformat.SampleRate * waveformat.NbrChannels;
+
         WavePlayerStart(waveformat, getDataCB, 70);
         f_close(&FileRead);
         
-			}
+      }
       break;
     
     default:
